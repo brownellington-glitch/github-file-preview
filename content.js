@@ -11,8 +11,11 @@
 
   const FILE_ICON = `<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M3.5 1.75v11.5c0 .09.048.17.12.217a.24.24 0 00.24.033L8 12.25l4.14 1.25a.24.24 0 00.24-.033.25.25 0 00.12-.217V1.75a.25.25 0 00-.25-.25h-8.5a.25.25 0 00-.25.25z"/></svg>`;
 
-  // Track already-processed file headers
+  // Track already-processed elements
   const processedFiles = new WeakSet();
+
+  // Cache PR info to avoid repeated API calls
+  let prInfoCache = null;
 
   // Extract repo info from the current URL
   function getRepoInfo() {
@@ -25,44 +28,71 @@
 
   // Get the file extension from a path
   function getFileExtension(filePath) {
-    const ext = filePath.split(".").pop().toLowerCase();
-    return ext;
+    return filePath.split(".").pop().toLowerCase();
   }
 
-  // Build the raw file URL for a given file in the PR
-  // We use the GitHub API to get the file content
-  async function fetchFileContent(filePath, repoInfo) {
-    // First, get the PR head SHA to construct the raw URL
-    const prApiUrl = `https://api.github.com/repos/${repoInfo.owner}/${repoInfo.repo}/pulls/${repoInfo.pr}`;
-    const prResp = await fetch(prApiUrl);
-    if (!prResp.ok) throw new Error(`Failed to fetch PR info: ${prResp.status}`);
-    const prData = await prResp.json();
-    const headSha = prData.head.sha;
-    const headRef = prData.head.ref;
-    const headRepo = prData.head.repo.full_name;
+  // Get stored GitHub token (if any)
+  async function getGitHubToken() {
+    return new Promise((resolve) => {
+      if (typeof chrome !== "undefined" && chrome.storage) {
+        chrome.storage.sync.get("githubToken", (data) => {
+          resolve(data.githubToken || "");
+        });
+      } else {
+        resolve("");
+      }
+    });
+  }
 
-    // Try raw.githubusercontent.com first
-    const rawUrl = `https://raw.githubusercontent.com/${headRepo}/${headRef}/${filePath}`;
-    const rawResp = await fetch(rawUrl);
-    if (rawResp.ok) {
-      return await rawResp.arrayBuffer();
+  // Fetch file content - works for both public and private repos
+  async function fetchFileContent(filePath, repoInfo) {
+    // Get PR head info (cached)
+    if (!prInfoCache) {
+      const token = await getGitHubToken();
+      const headers = { Accept: "application/vnd.github.v3+json" };
+      if (token) headers["Authorization"] = `token ${token}`;
+
+      const prApiUrl = `https://api.github.com/repos/${repoInfo.owner}/${repoInfo.repo}/pulls/${repoInfo.pr}`;
+      const prResp = await fetch(prApiUrl, { headers });
+      if (!prResp.ok) throw new Error(`Failed to fetch PR info: ${prResp.status}`);
+      prInfoCache = await prResp.json();
     }
 
-    // Fallback: use the git blob API
+    const headRef = prInfoCache.head.ref;
+    const headRepo = prInfoCache.head.repo.full_name;
+    const headSha = prInfoCache.head.sha;
+
+    // Strategy 1: Use same-origin GitHub URL (includes session cookies - works for private repos!)
+    try {
+      const sameOriginUrl = `https://github.com/${headRepo}/raw/${headRef}/${filePath}`;
+      const resp = await fetch(sameOriginUrl, { credentials: "same-origin" });
+      if (resp.ok) return await resp.arrayBuffer();
+    } catch (e) { /* continue to next strategy */ }
+
+    // Strategy 2: Use raw.githubusercontent.com (public repos)
+    try {
+      const rawUrl = `https://raw.githubusercontent.com/${headRepo}/${headRef}/${filePath}`;
+      const resp = await fetch(rawUrl);
+      if (resp.ok) return await resp.arrayBuffer();
+    } catch (e) { /* continue */ }
+
+    // Strategy 3: GitHub API with optional token (handles private repos with PAT)
+    const token = await getGitHubToken();
+    const apiHeaders = {};
+    if (token) apiHeaders["Authorization"] = `token ${token}`;
+
     const treeUrl = `https://api.github.com/repos/${headRepo}/contents/${filePath}?ref=${headSha}`;
-    const treeResp = await fetch(treeUrl);
+    const treeResp = await fetch(treeUrl, { headers: apiHeaders });
     if (!treeResp.ok) throw new Error(`Failed to fetch file: ${treeResp.status}`);
     const treeData = await treeResp.json();
 
     if (treeData.content) {
-      // Base64 encoded content
       const binary = atob(treeData.content.replace(/\n/g, ""));
       const bytes = new Uint8Array(binary.length);
       for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
       return bytes.buffer;
     }
 
-    // If too large, fetch from download_url
     if (treeData.download_url) {
       const dlResp = await fetch(treeData.download_url);
       if (dlResp.ok) return await dlResp.arrayBuffer();
@@ -71,10 +101,8 @@
     throw new Error("Could not retrieve file content");
   }
 
-  // Render PDF preview using canvas (no worker needed)
+  // Render PDF preview
   async function renderPDF(container, arrayBuffer) {
-    // Convert PDF to images using OffscreenCanvas approach
-    // Use an iframe with the extension's own PDF viewer page
     const bytes = new Uint8Array(arrayBuffer);
     let binary = "";
     for (let i = 0; i < bytes.length; i++) {
@@ -99,7 +127,6 @@
       return;
     }
 
-    // Sheet tabs
     const tabBar = document.createElement("div");
     tabBar.className = "ghfp-xlsx-tabs";
     container.appendChild(tabBar);
@@ -108,7 +135,6 @@
     container.appendChild(sheetContainer);
 
     function showSheet(name) {
-      // Update active tab
       tabBar.querySelectorAll(".ghfp-xlsx-tab").forEach((t) => {
         t.classList.toggle("active", t.dataset.sheet === name);
       });
@@ -121,14 +147,12 @@
         return;
       }
 
-      // Limit rows for preview
       const maxRows = Math.min(jsonData.length, 200);
       const maxCols = jsonData.reduce((max, row) => Math.max(max, row.length), 0);
 
       const table = document.createElement("table");
       table.className = "ghfp-xlsx-table";
 
-      // Header row
       if (jsonData.length > 0) {
         const thead = document.createElement("thead");
         const headerRow = document.createElement("tr");
@@ -141,7 +165,6 @@
         table.appendChild(thead);
       }
 
-      // Data rows
       const tbody = document.createElement("tbody");
       for (let r = 1; r < maxRows; r++) {
         const tr = document.createElement("tr");
@@ -163,7 +186,6 @@
       sheetContainer.appendChild(table);
     }
 
-    // Create tabs
     sheetNames.forEach((name, idx) => {
       const tab = document.createElement("button");
       tab.className = "ghfp-xlsx-tab" + (idx === 0 ? " active" : "");
@@ -193,8 +215,47 @@
     }
   }
 
+  // Find the file section container for a given element
+  function findFileSection(el) {
+    // Old UI: .file class
+    const fileEl = el.closest(".file");
+    if (fileEl) return fileEl;
+
+    // New UI: walk up looking for a container that has both a file link and "Binary file not shown"
+    let node = el;
+    for (let i = 0; i < 15 && node; i++) {
+      if (node.querySelector && node.querySelector('a[href*="#diff-"]')) {
+        return node;
+      }
+      node = node.parentElement;
+    }
+    return el.parentElement;
+  }
+
+  // Find the header row within a file section
+  function findHeaderInSection(section) {
+    // Old UI
+    const oldHeader = section.querySelector(".file-header");
+    if (oldHeader) return oldHeader;
+
+    // New UI: the first child div that contains the file link and action buttons
+    // Look for the row containing the filename link and the "..." menu
+    const fileLink = section.querySelector('a[href*="#diff-"]');
+    if (!fileLink) return null;
+
+    // Walk up from the file link to find the header row
+    let row = fileLink;
+    for (let i = 0; i < 5 && row; i++) {
+      // A header row typically has buttons (toggle, copy, menu)
+      if (row.querySelectorAll("button").length >= 2) return row;
+      row = row.parentElement;
+      if (row === section) return row.firstElementChild;
+    }
+    return fileLink.parentElement;
+  }
+
   // Create preview button and attach to a file header
-  function addPreviewButton(fileHeader, filePath, ext, repoInfo) {
+  function addPreviewButton(headerRow, filePath, ext, repoInfo) {
     const btn = document.createElement("button");
     btn.className = "ghfp-preview-btn";
     btn.innerHTML = `${FILE_ICON} Preview ${SUPPORTED_EXTENSIONS[ext]}`;
@@ -202,6 +263,8 @@
 
     let previewContainer = null;
     let isOpen = false;
+
+    const fileSection = findFileSection(headerRow);
 
     btn.addEventListener("click", async () => {
       if (isOpen && previewContainer) {
@@ -212,20 +275,9 @@
         return;
       }
 
-      // Find the file diff container (the parent that holds everything for this file)
-      // Old UI: .file, New UI: parent of DiffFileHeader (usually 2-3 levels up)
-      const fileContainer =
-        fileHeader.closest(".file") ||
-        fileHeader.closest('[data-tagsearch-path]') ||
-        fileHeader.closest('[class*="DiffSquished"]') ||
-        fileHeader.closest('[class*="diff-"]') ||
-        fileHeader.parentElement?.parentElement ||
-        fileHeader.parentElement;
-
       previewContainer = document.createElement("div");
       previewContainer.className = "ghfp-preview-container loading";
 
-      // Close button
       const closeBtn = document.createElement("button");
       closeBtn.className = "ghfp-close-btn";
       closeBtn.textContent = "Close";
@@ -238,20 +290,11 @@
 
       previewContainer.appendChild(closeBtn);
 
-      // Insert after the file header area
-      if (fileContainer) {
-        const diffContent =
-          fileContainer.querySelector(".js-file-content") ||
-          fileContainer.querySelector('[data-diff-anchor]') ||
-          fileContainer.querySelector('[class*="DiffContent"]') ||
-          fileContainer.lastElementChild;
-        if (diffContent && diffContent !== fileHeader) {
-          diffContent.insertAdjacentElement("afterend", previewContainer);
-        } else {
-          fileContainer.appendChild(previewContainer);
-        }
+      // Insert preview after the file section
+      if (fileSection) {
+        fileSection.appendChild(previewContainer);
       } else {
-        fileHeader.insertAdjacentElement("afterend", previewContainer);
+        headerRow.insertAdjacentElement("afterend", previewContainer);
       }
 
       isOpen = true;
@@ -272,186 +315,119 @@
         previewContainer.classList.remove("loading");
         previewContainer.classList.add("error");
         previewContainer.textContent = `Failed to load preview: ${err.message}`;
-        // Re-add close button
         previewContainer.prepend(closeBtn);
       }
     });
 
-    // Find a good place to insert the button
-    // Old UI: .file-actions, details
-    // New UI: ActionBar or the "..." menu button area
+    // Insert button into the header row
+    // Old UI: before .file-actions or details
     const actionsArea =
-      fileHeader.querySelector(".file-actions") ||
-      fileHeader.querySelector('[class*="ActionBar"]') ||
-      fileHeader.querySelector('[class*="actions"]') ||
-      fileHeader.querySelector("details") ||
-      null;
+      headerRow.querySelector(".file-actions") ||
+      headerRow.querySelector("details");
 
     if (actionsArea) {
       actionsArea.insertAdjacentElement("beforebegin", btn);
     } else {
-      // For new UI, insert before the last few action buttons (Viewed checkbox, comment, ...)
-      const lastButtons = fileHeader.querySelectorAll('button, [class*="prc-Button"]');
-      if (lastButtons.length > 1) {
-        // Insert before the second-to-last button group
-        lastButtons[lastButtons.length - 2].insertAdjacentElement("beforebegin", btn);
+      // New UI: insert before the last button group (usually the "..." menu)
+      const buttons = headerRow.querySelectorAll("button");
+      const lastBtn = buttons.length > 0 ? buttons[buttons.length - 1] : null;
+      if (lastBtn && lastBtn !== headerRow) {
+        lastBtn.insertAdjacentElement("beforebegin", btn);
       } else {
-        fileHeader.appendChild(btn);
+        headerRow.appendChild(btn);
       }
     }
   }
 
-  // Extract file path from a header element (works for both old and new UI)
-  function extractFilePath(header) {
-    // Direct attributes
-    let filePath =
-      header.getAttribute("data-tagsearch-path") ||
-      header.getAttribute("data-path") ||
-      "";
-
-    if (!filePath) {
-      // Try child elements (old UI: .file-info a, new UI: a.Link--primary > code)
-      const pathEl =
-        header.querySelector('[data-tagsearch-path]') ||
-        header.querySelector(".file-info a[title]") ||
-        header.querySelector('a[href*="#diff-"]') ||
-        header.querySelector(".Link--primary") ||
-        header.querySelector('a[title]');
-
-      if (pathEl) {
-        filePath =
-          pathEl.getAttribute("data-tagsearch-path") ||
-          pathEl.getAttribute("title") ||
-          pathEl.textContent.trim();
-      }
-    }
-
-    // Check parent .file element (old UI)
-    if (!filePath) {
-      const fileEl = header.closest(".file");
-      if (fileEl) {
-        const anchor = fileEl.querySelector('a[title]');
-        if (anchor) filePath = anchor.getAttribute("title") || anchor.textContent.trim();
-      }
-    }
-
-    return filePath;
-  }
-
-  // Check if a header already has a preview button (including in parent containers)
-  function alreadyHasButton(header) {
-    if (header.querySelector(".ghfp-preview-btn")) return true;
-    const parentFile = header.closest(".file") || header.closest('[class*="DiffSquished"]') || header.parentElement;
-    if (parentFile && parentFile.querySelector(".ghfp-preview-btn")) return true;
-    return false;
-  }
-
-  // Scan the page for binary files that can be previewed
+  // UNIVERSAL file scanner - works for both old and new GitHub UI
   function scanForFiles() {
     const repoInfo = getRepoInfo();
     if (!repoInfo) return;
 
-    // Find all file headers in the PR diff view
-    // Old UI: .file-header, [data-tagsearch-path], .file-info, .diffbar
-    // New UI (React): elements with DiffFileHeader CSS module classes
-    const fileHeaders = document.querySelectorAll(
-      '.file-header, [data-tagsearch-path], .file-info, .diffbar, [class*="DiffFileHeader"]'
-    );
+    // Strategy: find ALL diff-anchor links on the page (present in both old and new UI)
+    // These are links like: <a href="#diff-abc123">filename.ext</a>
+    const diffLinks = document.querySelectorAll('a[href*="#diff-"]');
 
-    fileHeaders.forEach((header) => {
+    diffLinks.forEach((link) => {
+      if (processedFiles.has(link)) return;
+
+      // Extract filename from link text or attributes
+      let filePath =
+        link.getAttribute("title") ||
+        link.getAttribute("data-tagsearch-path") ||
+        link.textContent.trim();
+
+      if (!filePath) return;
+
+      const ext = getFileExtension(filePath);
+      if (!SUPPORTED_EXTENSIONS[ext]) return;
+
+      // Find the file section this link belongs to
+      const section = findFileSection(link);
+      if (!section) return;
+
+      // Mark as processed (mark the section, not just the link, to avoid duplicates)
+      if (processedFiles.has(section)) return;
+      processedFiles.add(section);
+      processedFiles.add(link);
+
+      // Check if already has a preview button
+      if (section.querySelector(".ghfp-preview-btn")) return;
+
+      // Find the header row
+      const headerRow = findHeaderInSection(section);
+      if (!headerRow) return;
+
+      addPreviewButton(headerRow, filePath, ext, repoInfo);
+    });
+
+    // Fallback: also scan for old UI-specific elements
+    scanOldUIFiles(repoInfo);
+  }
+
+  // Old UI specific scanning (backward compatibility)
+  function scanOldUIFiles(repoInfo) {
+    document.querySelectorAll('.file-header[data-tagsearch-path]').forEach((header) => {
       if (processedFiles.has(header)) return;
       processedFiles.add(header);
 
-      const filePath = extractFilePath(header);
+      const filePath = header.getAttribute("data-tagsearch-path");
       if (!filePath) return;
 
       const ext = getFileExtension(filePath);
       if (!SUPPORTED_EXTENSIONS[ext]) return;
 
-      if (alreadyHasButton(header)) return;
+      const section = header.closest(".file") || header.parentElement;
+      if (section.querySelector(".ghfp-preview-btn")) return;
 
       addPreviewButton(header, filePath, ext, repoInfo);
     });
-
-    // Also look for "Binary file not shown" messages and add buttons near them
-    // Old UI: .empty-diff, .data.empty
-    // New UI: plain text in various containers
-    document.querySelectorAll(".empty-diff, .data.empty").forEach((emptyDiff) => {
-      if (processedFiles.has(emptyDiff)) return;
-      processedFiles.add(emptyDiff);
-
-      const fileEl = emptyDiff.closest(".file");
-      if (!fileEl) return;
-
-      const header = fileEl.querySelector(".file-header");
-      if (!header || header.querySelector(".ghfp-preview-btn")) return;
-
-      const filePath = extractFilePath(fileEl);
-      if (!filePath) return;
-      const ext = getFileExtension(filePath);
-      if (!SUPPORTED_EXTENSIONS[ext]) return;
-
-      addPreviewButton(header, filePath, ext, repoInfo);
-    });
-
-    // New UI fallback: scan for "Binary file not shown" text nodes
-    // and find the nearest file header ancestor
-    if (!document.querySelector('.file-header')) {
-      scanNewUIBinaryFiles(repoInfo);
-    }
   }
 
-  // New UI: find binary file sections by walking up from "Binary file not shown" text
-  function scanNewUIBinaryFiles(repoInfo) {
-    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
-    while (walker.nextNode()) {
-      const node = walker.currentNode;
-      if (!node.textContent.includes("Binary file not shown")) continue;
-
-      // Walk up to find the file container
-      let container = node.parentElement;
-      for (let i = 0; i < 10 && container; i++) {
-        // Look for a DiffFileHeader inside this container
-        const header = container.querySelector('[class*="DiffFileHeader"]');
-        if (header) {
-          if (processedFiles.has(container)) break;
-          processedFiles.add(container);
-
-          const filePath = extractFilePath(header);
-          if (!filePath) break;
-
-          const ext = getFileExtension(filePath);
-          if (!SUPPORTED_EXTENSIONS[ext]) break;
-
-          if (alreadyHasButton(header)) break;
-
-          addPreviewButton(header, filePath, ext, repoInfo);
-          break;
-        }
-        container = container.parentElement;
-      }
-    }
+  // Debounce scan to avoid excessive re-scanning
+  let scanTimeout = null;
+  function debouncedScan() {
+    if (scanTimeout) clearTimeout(scanTimeout);
+    scanTimeout = setTimeout(() => scanForFiles(), 200);
   }
 
   // Run initial scan
   scanForFiles();
 
-  // Observe DOM changes (GitHub uses turbo/pjax for navigation)
-  const observer = new MutationObserver(() => {
-    scanForFiles();
-  });
-
+  // Observe DOM changes (GitHub SPA navigation)
+  const observer = new MutationObserver(debouncedScan);
   observer.observe(document.body, {
     childList: true,
     subtree: true,
   });
 
-  // Also re-scan on turbo navigation
+  // Re-scan on turbo/pjax navigation
   document.addEventListener("turbo:load", () => scanForFiles());
   document.addEventListener("pjax:end", () => scanForFiles());
 
-  // Re-scan after a delay to catch late-rendered content
-  setTimeout(() => scanForFiles(), 3000);
+  // Re-scan after delays to catch late-rendered React content
+  setTimeout(() => scanForFiles(), 2000);
+  setTimeout(() => scanForFiles(), 5000);
 
-  console.log("[GitHub PR File Preview] Extension loaded");
+  console.log("[GitHub PR File Preview] Extension loaded v1.3.0");
 })();
