@@ -1,0 +1,184 @@
+/* GitHub PR File Preview Extension Styles */
+.ghfp-preview-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  margin-left: 8px;
+  font-size: 12px;
+  font-weight: 500;
+  color: #58a6ff;
+  background: transparent;
+  border: 1px solid #30363d;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  vertical-align: middle;
+}
+
+.ghfp-preview-btn:hover {
+  background: #161b22;
+  border-color: #58a6ff;
+}
+
+.ghfp-preview-btn.active {
+  background: #1f6feb;
+  color: #fff;
+  border-color: #1f6feb;
+}
+
+.ghfp-preview-container {
+  padding: 16px;
+  background: #0d1117;
+  border: 1px solid #30363d;
+  border-radius: 6px;
+  margin: 8px 0;
+  overflow: auto;
+  max-height: 600px;
+  position: relative;
+}
+
+.ghfp-preview-container.loading::after {
+  content: "Loading preview...";
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 40px;
+  color: #8b949e;
+  font-size: 14px;
+}
+
+.ghfp-preview-container.error {
+  color: #f85149;
+  padding: 20px;
+  text-align: center;
+}
+
+/* PDF Preview */
+.ghfp-pdf-page {
+  margin-bottom: 8px;
+  text-align: center;
+}
+
+.ghfp-pdf-page canvas {
+  max-width: 100%;
+  border: 1px solid #21262d;
+  border-radius: 4px;
+}
+
+.ghfp-pdf-page-label {
+  color: #8b949e;
+  font-size: 11px;
+  margin-top: 4px;
+}
+
+/* XLSX Preview */
+.ghfp-xlsx-tabs {
+  display: flex;
+  gap: 2px;
+  margin-bottom: 8px;
+  border-bottom: 1px solid #21262d;
+  overflow-x: auto;
+}
+
+.ghfp-xlsx-tab {
+  padding: 6px 12px;
+  font-size: 12px;
+  color: #8b949e;
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.ghfp-xlsx-tab:hover {
+  color: #c9d1d9;
+}
+
+.ghfp-xlsx-tab.active {
+  color: #58a6ff;
+  border-bottom-color: #58a6ff;
+}
+
+.ghfp-xlsx-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+}
+
+.ghfp-xlsx-table th {
+  background: #161b22;
+  color: #c9d1d9;
+  font-weight: 600;
+  padding: 6px 10px;
+  border: 1px solid #21262d;
+  text-align: left;
+  position: sticky;
+  top: 0;
+}
+
+.ghfp-xlsx-table td {
+  padding: 4px 10px;
+  border: 1px solid #21262d;
+  color: #c9d1d9;
+}
+
+.ghfp-xlsx-table tr:hover td {
+  background: #161b22;
+}
+
+/* DOCX Preview */
+.ghfp-docx-content {
+  color: #c9d1d9;
+  font-size: 14px;
+  line-height: 1.6;
+  padding: 16px;
+}
+
+.ghfp-docx-content h1,
+.ghfp-docx-content h2,
+.ghfp-docx-content h3 {
+  color: #e6edf3;
+  margin: 16px 0 8px 0;
+}
+
+.ghfp-docx-content p {
+  margin: 8px 0;
+}
+
+.ghfp-docx-content table {
+  border-collapse: collapse;
+  margin: 8px 0;
+}
+
+.ghfp-docx-content table td,
+.ghfp-docx-content table th {
+  border: 1px solid #30363d;
+  padding: 6px 10px;
+}
+
+.ghfp-docx-content img {
+  max-width: 100%;
+}
+
+/* Close button */
+.ghfp-close-btn {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  background: #21262d;
+  border: 1px solid #30363d;
+  color: #8b949e;
+  border-radius: 4px;
+  padding: 2px 8px;
+  cursor: pointer;
+  font-size: 12px;
+  z-index: 10;
+}
+
+.ghfp-close-btn:hover {
+  color: #f85149;
+  border-color: #f85149;
+}
