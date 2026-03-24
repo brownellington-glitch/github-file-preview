@@ -390,8 +390,11 @@
   });
 
   // Also re-scan on turbo navigation
-  document.addEventListener("turbo:load", scanForFiles);
-  document.addEventListener("pjax:end", scanForFiles);
+  document.addEventListener("turbo:load", () => scanForFiles());
+  document.addEventListener("pjax:end", () => scanForFiles());
+
+  // Re-scan after a delay to catch late-rendered content
+  setTimeout(() => scanForFiles(), 3000);
 
   console.log("[GitHub PR File Preview] Extension loaded");
 })();

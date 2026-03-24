@@ -1,13 +1,16 @@
 {
   "manifest_version": 3,
   "name": "GitHub PR File Preview",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Preview PDF, XLSX, and DOCX files directly in GitHub Pull Request pages",
   "permissions": ["activeTab"],
   "host_permissions": ["https://github.com/*", "https://raw.githubusercontent.com/*"],
   "content_scripts": [
     {
-      "matches": ["https://github.com/*/pull/*/files*"],
+      "matches": [
+          "https://github.com/*/pull/*/files*",
+          "https://github.com/*/pull/*/changes*"
+        ],
       "js": ["lib/xlsx.full.min.js", "lib/mammoth.browser.min.js", "content.js"],
       "css": ["styles.css"],
       "run_at": "document_idle"
