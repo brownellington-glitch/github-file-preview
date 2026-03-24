@@ -213,9 +213,13 @@
       }
 
       // Find the file diff container (the parent that holds everything for this file)
+      // Old UI: .file, New UI: parent of DiffFileHeader (usually 2-3 levels up)
       const fileContainer =
         fileHeader.closest(".file") ||
         fileHeader.closest('[data-tagsearch-path]') ||
+        fileHeader.closest('[class*="DiffSquished"]') ||
+        fileHeader.closest('[class*="diff-"]') ||
+        fileHeader.parentElement?.parentElement ||
         fileHeader.parentElement;
 
       previewContainer = document.createElement("div");
@@ -239,8 +243,9 @@
         const diffContent =
           fileContainer.querySelector(".js-file-content") ||
           fileContainer.querySelector('[data-diff-anchor]') ||
+          fileContainer.querySelector('[class*="DiffContent"]') ||
           fileContainer.lastElementChild;
-        if (diffContent) {
+        if (diffContent && diffContent !== fileHeader) {
           diffContent.insertAdjacentElement("afterend", previewContainer);
         } else {
           fileContainer.appendChild(previewContainer);
@@ -273,17 +278,72 @@
     });
 
     // Find a good place to insert the button
+    // Old UI: .file-actions, details
+    // New UI: ActionBar or the "..." menu button area
     const actionsArea =
       fileHeader.querySelector(".file-actions") ||
       fileHeader.querySelector('[class*="ActionBar"]') ||
+      fileHeader.querySelector('[class*="actions"]') ||
       fileHeader.querySelector("details") ||
-      fileHeader;
+      null;
 
-    if (actionsArea === fileHeader) {
-      fileHeader.appendChild(btn);
-    } else {
+    if (actionsArea) {
       actionsArea.insertAdjacentElement("beforebegin", btn);
+    } else {
+      // For new UI, insert before the last few action buttons (Viewed checkbox, comment, ...)
+      const lastButtons = fileHeader.querySelectorAll('button, [class*="prc-Button"]');
+      if (lastButtons.length > 1) {
+        // Insert before the second-to-last button group
+        lastButtons[lastButtons.length - 2].insertAdjacentElement("beforebegin", btn);
+      } else {
+        fileHeader.appendChild(btn);
+      }
     }
+  }
+
+  // Extract file path from a header element (works for both old and new UI)
+  function extractFilePath(header) {
+    // Direct attributes
+    let filePath =
+      header.getAttribute("data-tagsearch-path") ||
+      header.getAttribute("data-path") ||
+      "";
+
+    if (!filePath) {
+      // Try child elements (old UI: .file-info a, new UI: a.Link--primary > code)
+      const pathEl =
+        header.querySelector('[data-tagsearch-path]') ||
+        header.querySelector(".file-info a[title]") ||
+        header.querySelector('a[href*="#diff-"]') ||
+        header.querySelector(".Link--primary") ||
+        header.querySelector('a[title]');
+
+      if (pathEl) {
+        filePath =
+          pathEl.getAttribute("data-tagsearch-path") ||
+          pathEl.getAttribute("title") ||
+          pathEl.textContent.trim();
+      }
+    }
+
+    // Check parent .file element (old UI)
+    if (!filePath) {
+      const fileEl = header.closest(".file");
+      if (fileEl) {
+        const anchor = fileEl.querySelector('a[title]');
+        if (anchor) filePath = anchor.getAttribute("title") || anchor.textContent.trim();
+      }
+    }
+
+    return filePath;
+  }
+
+  // Check if a header already has a preview button (including in parent containers)
+  function alreadyHasButton(header) {
+    if (header.querySelector(".ghfp-preview-btn")) return true;
+    const parentFile = header.closest(".file") || header.closest('[class*="DiffSquished"]') || header.parentElement;
+    if (parentFile && parentFile.querySelector(".ghfp-preview-btn")) return true;
+    return false;
   }
 
   // Scan the page for binary files that can be previewed
@@ -292,61 +352,30 @@
     if (!repoInfo) return;
 
     // Find all file headers in the PR diff view
-    // GitHub uses different structures, so we try multiple selectors
+    // Old UI: .file-header, [data-tagsearch-path], .file-info, .diffbar
+    // New UI (React): elements with DiffFileHeader CSS module classes
     const fileHeaders = document.querySelectorAll(
-      '.file-header, [data-tagsearch-path], .file-info, .diffbar'
+      '.file-header, [data-tagsearch-path], .file-info, .diffbar, [class*="DiffFileHeader"]'
     );
 
     fileHeaders.forEach((header) => {
       if (processedFiles.has(header)) return;
       processedFiles.add(header);
 
-      // Extract file path from various possible locations
-      let filePath =
-        header.getAttribute("data-tagsearch-path") ||
-        header.getAttribute("data-path") ||
-        "";
-
-      if (!filePath) {
-        // Try to find it in a child element
-        const pathEl =
-          header.querySelector('[data-tagsearch-path]') ||
-          header.querySelector(".file-info a[title]") ||
-          header.querySelector('a[href*="#diff-"]') ||
-          header.querySelector(".Link--primary") ||
-          header.querySelector('a[title]');
-
-        if (pathEl) {
-          filePath =
-            pathEl.getAttribute("data-tagsearch-path") ||
-            pathEl.getAttribute("title") ||
-            pathEl.textContent.trim();
-        }
-      }
-
-      // Also check the parent .file element
-      if (!filePath) {
-        const fileEl = header.closest(".file");
-        if (fileEl) {
-          const anchor = fileEl.querySelector('a[title]');
-          if (anchor) filePath = anchor.getAttribute("title") || anchor.textContent.trim();
-        }
-      }
-
+      const filePath = extractFilePath(header);
       if (!filePath) return;
 
       const ext = getFileExtension(filePath);
       if (!SUPPORTED_EXTENSIONS[ext]) return;
 
-      // Check if we already added a button here
-      if (header.querySelector(".ghfp-preview-btn")) return;
-      const parentFile = header.closest(".file");
-      if (parentFile && parentFile.querySelector(".ghfp-preview-btn")) return;
+      if (alreadyHasButton(header)) return;
 
       addPreviewButton(header, filePath, ext, repoInfo);
     });
 
     // Also look for "Binary file not shown" messages and add buttons near them
+    // Old UI: .empty-diff, .data.empty
+    // New UI: plain text in various containers
     document.querySelectorAll(".empty-diff, .data.empty").forEach((emptyDiff) => {
       if (processedFiles.has(emptyDiff)) return;
       processedFiles.add(emptyDiff);
@@ -357,23 +386,51 @@
       const header = fileEl.querySelector(".file-header");
       if (!header || header.querySelector(".ghfp-preview-btn")) return;
 
-      let filePath = "";
-      const pathEl =
-        fileEl.querySelector('[data-tagsearch-path]') ||
-        fileEl.querySelector('a[title]');
-      if (pathEl) {
-        filePath =
-          pathEl.getAttribute("data-tagsearch-path") ||
-          pathEl.getAttribute("title") ||
-          pathEl.textContent.trim();
-      }
-
+      const filePath = extractFilePath(fileEl);
       if (!filePath) return;
       const ext = getFileExtension(filePath);
       if (!SUPPORTED_EXTENSIONS[ext]) return;
 
       addPreviewButton(header, filePath, ext, repoInfo);
     });
+
+    // New UI fallback: scan for "Binary file not shown" text nodes
+    // and find the nearest file header ancestor
+    if (!document.querySelector('.file-header')) {
+      scanNewUIBinaryFiles(repoInfo);
+    }
+  }
+
+  // New UI: find binary file sections by walking up from "Binary file not shown" text
+  function scanNewUIBinaryFiles(repoInfo) {
+    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+    while (walker.nextNode()) {
+      const node = walker.currentNode;
+      if (!node.textContent.includes("Binary file not shown")) continue;
+
+      // Walk up to find the file container
+      let container = node.parentElement;
+      for (let i = 0; i < 10 && container; i++) {
+        // Look for a DiffFileHeader inside this container
+        const header = container.querySelector('[class*="DiffFileHeader"]');
+        if (header) {
+          if (processedFiles.has(container)) break;
+          processedFiles.add(container);
+
+          const filePath = extractFilePath(header);
+          if (!filePath) break;
+
+          const ext = getFileExtension(filePath);
+          if (!SUPPORTED_EXTENSIONS[ext]) break;
+
+          if (alreadyHasButton(header)) break;
+
+          addPreviewButton(header, filePath, ext, repoInfo);
+          break;
+        }
+        container = container.parentElement;
+      }
+    }
   }
 
   // Run initial scan
