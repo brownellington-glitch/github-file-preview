@@ -11,13 +11,14 @@
 
   const FILE_ICON = `<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M3.5 1.75v11.5c0 .09.048.17.12.217a.24.24 0 00.24.033L8 12.25l4.14 1.25a.24.24 0 00.24-.033.25.25 0 00.12-.217V1.75a.25.25 0 00-.25-.25h-8.5a.25.25 0 00-.25.25z"/></svg>`;
 
-  // Track already-processed elements
   const processedFiles = new WeakSet();
-
-  // Cache PR info to avoid repeated API calls
   let prInfoCache = null;
 
-  // Extract repo info from the current URL
+  // Strip invisible Unicode characters (LTR/RTL marks, zero-width spaces, etc.)
+  function cleanFileName(name) {
+    return name.replace(/[\u200B-\u200F\u2028-\u202F\uFEFF]/g, "").trim();
+  }
+
   function getRepoInfo() {
     const match = location.pathname.match(
       /^\/([^/]+)\/([^/]+)\/pull\/(\d+)/
@@ -26,12 +27,10 @@
     return { owner: match[1], repo: match[2], pr: match[3] };
   }
 
-  // Get the file extension from a path
   function getFileExtension(filePath) {
     return filePath.split(".").pop().toLowerCase();
   }
 
-  // Get stored GitHub token (if any)
   async function getGitHubToken() {
     return new Promise((resolve) => {
       if (typeof chrome !== "undefined" && chrome.storage) {
@@ -44,9 +43,7 @@
     });
   }
 
-  // Fetch file content - works for both public and private repos
   async function fetchFileContent(filePath, repoInfo) {
-    // Get PR head info (cached)
     if (!prInfoCache) {
       const token = await getGitHubToken();
       const headers = { Accept: "application/vnd.github.v3+json" };
@@ -62,21 +59,21 @@
     const headRepo = prInfoCache.head.repo.full_name;
     const headSha = prInfoCache.head.sha;
 
-    // Strategy 1: Use same-origin GitHub URL (includes session cookies - works for private repos!)
+    // Strategy 1: Same-origin fetch (includes session cookies - works for private repos)
     try {
       const sameOriginUrl = `https://github.com/${headRepo}/raw/${headRef}/${filePath}`;
       const resp = await fetch(sameOriginUrl, { credentials: "same-origin" });
       if (resp.ok) return await resp.arrayBuffer();
-    } catch (e) { /* continue to next strategy */ }
+    } catch (e) { /* continue */ }
 
-    // Strategy 2: Use raw.githubusercontent.com (public repos)
+    // Strategy 2: raw.githubusercontent.com (public repos)
     try {
       const rawUrl = `https://raw.githubusercontent.com/${headRepo}/${headRef}/${filePath}`;
       const resp = await fetch(rawUrl);
       if (resp.ok) return await resp.arrayBuffer();
     } catch (e) { /* continue */ }
 
-    // Strategy 3: GitHub API with optional token (handles private repos with PAT)
+    // Strategy 3: GitHub API with optional token
     const token = await getGitHubToken();
     const apiHeaders = {};
     if (token) apiHeaders["Authorization"] = `token ${token}`;
@@ -101,7 +98,6 @@
     throw new Error("Could not retrieve file content");
   }
 
-  // Render PDF preview
   async function renderPDF(container, arrayBuffer) {
     const bytes = new Uint8Array(arrayBuffer);
     let binary = "";
@@ -117,7 +113,6 @@
     container.appendChild(iframe);
   }
 
-  // Render XLSX preview
   function renderXLSX(container, arrayBuffer) {
     const workbook = XLSX.read(arrayBuffer, { type: "array" });
     const sheetNames = workbook.SheetNames;
@@ -198,7 +193,6 @@
     showSheet(sheetNames[0]);
   }
 
-  // Render DOCX preview
   async function renderDOCX(container, arrayBuffer) {
     const result = await mammoth.convertToHtml({ arrayBuffer });
 
@@ -215,102 +209,91 @@
     }
   }
 
-  // Find the file section container for a given element
-  function findFileSection(el) {
-    // Old UI: .file class
-    const fileEl = el.closest(".file");
-    if (fileEl) return fileEl;
+  function createPreviewContainer(btn) {
+    const previewContainer = document.createElement("div");
+    previewContainer.className = "ghfp-preview-container loading";
 
-    // New UI: walk up looking for a container that has both a file link and "Binary file not shown"
-    let node = el;
-    for (let i = 0; i < 15 && node; i++) {
-      if (node.querySelector && node.querySelector('a[href*="#diff-"]')) {
-        return node;
-      }
-      node = node.parentElement;
-    }
-    return el.parentElement;
+    const closeBtn = document.createElement("button");
+    closeBtn.className = "ghfp-close-btn";
+    closeBtn.textContent = "Close";
+    closeBtn.addEventListener("click", () => {
+      previewContainer.remove();
+      btn._ghfpOpen = false;
+      btn.classList.remove("active");
+    });
+
+    previewContainer.appendChild(closeBtn);
+    return { previewContainer, closeBtn };
   }
 
-  // Find the header row within a file section
-  function findHeaderInSection(section) {
-    // Old UI
-    const oldHeader = section.querySelector(".file-header");
-    if (oldHeader) return oldHeader;
+  // ===== NEW REACT UI (prx_files / /changes URL) =====
 
-    // New UI: the first child div that contains the file link and action buttons
-    // Look for the row containing the filename link and the "..." menu
-    const fileLink = section.querySelector('a[href*="#diff-"]');
-    if (!fileLink) return null;
+  function scanNewUI(repoInfo) {
+    // New UI diff sections have id="diff-<hash>" and class containing "Diff-module__diff"
+    const diffSections = document.querySelectorAll('div[id^="diff-"][class*="Diff-module"]');
 
-    // Walk up from the file link to find the header row
-    let row = fileLink;
-    for (let i = 0; i < 5 && row; i++) {
-      // A header row typically has buttons (toggle, copy, menu)
-      if (row.querySelectorAll("button").length >= 2) return row;
-      row = row.parentElement;
-      if (row === section) return row.firstElementChild;
-    }
-    return fileLink.parentElement;
+    diffSections.forEach((section) => {
+      if (processedFiles.has(section)) return;
+
+      // Find the filename link: Link--primary inside DiffFileHeader
+      const fileLink = section.querySelector('a.Link--primary[href*="#diff-"]');
+      if (!fileLink) return;
+
+      // Extract and clean filename (strip invisible Unicode chars like U+200E)
+      let filePath = fileLink.getAttribute("title") || cleanFileName(fileLink.textContent);
+      if (!filePath) return;
+      filePath = cleanFileName(filePath);
+
+      const ext = getFileExtension(filePath);
+      if (!SUPPORTED_EXTENSIONS[ext]) return;
+
+      processedFiles.add(section);
+
+      if (section.querySelector(".ghfp-preview-btn")) return;
+
+      // Find the file header div
+      const fileHeader = section.querySelector('[class*="DiffFileHeader-module__diff-file-header"]');
+      if (!fileHeader) return;
+
+      addNewUIPreviewButton(fileHeader, section, filePath, ext, repoInfo);
+    });
   }
 
-  // Create preview button and attach to a file header
-  function addPreviewButton(headerRow, filePath, ext, repoInfo) {
+  function addNewUIPreviewButton(fileHeader, diffSection, filePath, ext, repoInfo) {
     const btn = document.createElement("button");
     btn.className = "ghfp-preview-btn";
     btn.innerHTML = `${FILE_ICON} Preview ${SUPPORTED_EXTENSIONS[ext]}`;
     btn.title = `Preview ${filePath}`;
-
-    let previewContainer = null;
-    let isOpen = false;
-
-    const fileSection = findFileSection(headerRow);
+    btn._ghfpOpen = false;
 
     btn.addEventListener("click", async () => {
-      if (isOpen && previewContainer) {
-        previewContainer.remove();
-        previewContainer = null;
-        isOpen = false;
+      if (btn._ghfpOpen) {
+        const existing = diffSection.querySelector(".ghfp-preview-container");
+        if (existing) existing.remove();
+        btn._ghfpOpen = false;
         btn.classList.remove("active");
         return;
       }
 
-      previewContainer = document.createElement("div");
-      previewContainer.className = "ghfp-preview-container loading";
+      const { previewContainer, closeBtn } = createPreviewContainer(btn);
 
-      const closeBtn = document.createElement("button");
-      closeBtn.className = "ghfp-close-btn";
-      closeBtn.textContent = "Close";
-      closeBtn.addEventListener("click", () => {
-        previewContainer.remove();
-        previewContainer = null;
-        isOpen = false;
-        btn.classList.remove("active");
-      });
-
-      previewContainer.appendChild(closeBtn);
-
-      // Insert preview after the file section
-      if (fileSection) {
-        fileSection.appendChild(previewContainer);
+      // Insert after the header wrapper (before the diff content area)
+      const headerWrapper = diffSection.querySelector('[class*="Diff-module__diffHeaderWrapper"]');
+      if (headerWrapper && headerWrapper.nextSibling) {
+        headerWrapper.parentNode.insertBefore(previewContainer, headerWrapper.nextSibling);
       } else {
-        headerRow.insertAdjacentElement("afterend", previewContainer);
+        diffSection.appendChild(previewContainer);
       }
 
-      isOpen = true;
+      btn._ghfpOpen = true;
       btn.classList.add("active");
 
       try {
         const arrayBuffer = await fetchFileContent(filePath, repoInfo);
         previewContainer.classList.remove("loading");
-
-        if (ext === "pdf") {
-          await renderPDF(previewContainer, arrayBuffer);
-        } else if (ext === "xlsx" || ext === "xls") {
-          renderXLSX(previewContainer, arrayBuffer);
-        } else if (ext === "docx" || ext === "doc") {
-          await renderDOCX(previewContainer, arrayBuffer);
-        }
+        if (ext === "pdf") await renderPDF(previewContainer, arrayBuffer);
+        else if (ext === "xlsx" || ext === "xls") renderXLSX(previewContainer, arrayBuffer);
+        else if (ext === "docx" || ext === "doc") await renderDOCX(previewContainer, arrayBuffer);
       } catch (err) {
         previewContainer.classList.remove("loading");
         previewContainer.classList.add("error");
@@ -319,74 +302,26 @@
       }
     });
 
-    // Insert button into the header row
-    // Old UI: before .file-actions or details
-    const actionsArea =
-      headerRow.querySelector(".file-actions") ||
-      headerRow.querySelector("details");
-
-    if (actionsArea) {
-      actionsArea.insertAdjacentElement("beforebegin", btn);
+    // Insert button into the header's right-side action area
+    // Structure: fileHeader > [collapse btn] [file-path-section] [right-side flex container]
+    const rightSide = fileHeader.querySelector(".d-flex.flex-row.flex-justify-end");
+    if (rightSide) {
+      rightSide.insertAdjacentElement("beforebegin", btn);
     } else {
-      // New UI: insert before the last button group (usually the "..." menu)
-      const buttons = headerRow.querySelectorAll("button");
-      const lastBtn = buttons.length > 0 ? buttons[buttons.length - 1] : null;
-      if (lastBtn && lastBtn !== headerRow) {
-        lastBtn.insertAdjacentElement("beforebegin", btn);
+      // Fallback: insert before the last button group
+      const kebab = fileHeader.querySelector('[aria-haspopup="true"]');
+      if (kebab) {
+        kebab.insertAdjacentElement("beforebegin", btn);
       } else {
-        headerRow.appendChild(btn);
+        fileHeader.appendChild(btn);
       }
     }
   }
 
-  // UNIVERSAL file scanner - works for both old and new GitHub UI
-  function scanForFiles() {
-    const repoInfo = getRepoInfo();
-    if (!repoInfo) return;
+  // ===== OLD UI (.file / .file-header) =====
 
-    // Strategy: find ALL diff-anchor links on the page (present in both old and new UI)
-    // These are links like: <a href="#diff-abc123">filename.ext</a>
-    const diffLinks = document.querySelectorAll('a[href*="#diff-"]');
-
-    diffLinks.forEach((link) => {
-      if (processedFiles.has(link)) return;
-
-      // Extract filename from link text or attributes
-      let filePath =
-        link.getAttribute("title") ||
-        link.getAttribute("data-tagsearch-path") ||
-        link.textContent.trim();
-
-      if (!filePath) return;
-
-      const ext = getFileExtension(filePath);
-      if (!SUPPORTED_EXTENSIONS[ext]) return;
-
-      // Find the file section this link belongs to
-      const section = findFileSection(link);
-      if (!section) return;
-
-      // Mark as processed (mark the section, not just the link, to avoid duplicates)
-      if (processedFiles.has(section)) return;
-      processedFiles.add(section);
-      processedFiles.add(link);
-
-      // Check if already has a preview button
-      if (section.querySelector(".ghfp-preview-btn")) return;
-
-      // Find the header row
-      const headerRow = findHeaderInSection(section);
-      if (!headerRow) return;
-
-      addPreviewButton(headerRow, filePath, ext, repoInfo);
-    });
-
-    // Fallback: also scan for old UI-specific elements
-    scanOldUIFiles(repoInfo);
-  }
-
-  // Old UI specific scanning (backward compatibility)
-  function scanOldUIFiles(repoInfo) {
+  function scanOldUI(repoInfo) {
+    // Old UI: .file-header with data-tagsearch-path
     document.querySelectorAll('.file-header[data-tagsearch-path]').forEach((header) => {
       if (processedFiles.has(header)) return;
       processedFiles.add(header);
@@ -400,34 +335,111 @@
       const section = header.closest(".file") || header.parentElement;
       if (section.querySelector(".ghfp-preview-btn")) return;
 
-      addPreviewButton(header, filePath, ext, repoInfo);
+      addOldUIPreviewButton(header, section, filePath, ext, repoInfo);
+    });
+
+    // Also scan for diff links in .file sections (old UI variant)
+    document.querySelectorAll('.file a[href*="#diff-"]').forEach((link) => {
+      if (processedFiles.has(link)) return;
+
+      const section = link.closest(".file");
+      if (!section || processedFiles.has(section)) return;
+
+      let filePath = link.getAttribute("title") || link.getAttribute("data-tagsearch-path") || cleanFileName(link.textContent);
+      if (!filePath) return;
+      filePath = cleanFileName(filePath);
+
+      const ext = getFileExtension(filePath);
+      if (!SUPPORTED_EXTENSIONS[ext]) return;
+
+      processedFiles.add(section);
+      processedFiles.add(link);
+
+      if (section.querySelector(".ghfp-preview-btn")) return;
+
+      const headerRow = section.querySelector(".file-header") || link.parentElement;
+      addOldUIPreviewButton(headerRow, section, filePath, ext, repoInfo);
     });
   }
 
-  // Debounce scan to avoid excessive re-scanning
+  function addOldUIPreviewButton(headerRow, fileSection, filePath, ext, repoInfo) {
+    const btn = document.createElement("button");
+    btn.className = "ghfp-preview-btn";
+    btn.innerHTML = `${FILE_ICON} Preview ${SUPPORTED_EXTENSIONS[ext]}`;
+    btn.title = `Preview ${filePath}`;
+    btn._ghfpOpen = false;
+
+    btn.addEventListener("click", async () => {
+      if (btn._ghfpOpen) {
+        const existing = fileSection.querySelector(".ghfp-preview-container");
+        if (existing) existing.remove();
+        btn._ghfpOpen = false;
+        btn.classList.remove("active");
+        return;
+      }
+
+      const { previewContainer, closeBtn } = createPreviewContainer(btn);
+      fileSection.appendChild(previewContainer);
+      btn._ghfpOpen = true;
+      btn.classList.add("active");
+
+      try {
+        const arrayBuffer = await fetchFileContent(filePath, repoInfo);
+        previewContainer.classList.remove("loading");
+        if (ext === "pdf") await renderPDF(previewContainer, arrayBuffer);
+        else if (ext === "xlsx" || ext === "xls") renderXLSX(previewContainer, arrayBuffer);
+        else if (ext === "docx" || ext === "doc") await renderDOCX(previewContainer, arrayBuffer);
+      } catch (err) {
+        previewContainer.classList.remove("loading");
+        previewContainer.classList.add("error");
+        previewContainer.textContent = `Failed to load preview: ${err.message}`;
+        previewContainer.prepend(closeBtn);
+      }
+    });
+
+    const actionsArea =
+      headerRow.querySelector(".file-actions") ||
+      headerRow.querySelector("details");
+
+    if (actionsArea) {
+      actionsArea.insertAdjacentElement("beforebegin", btn);
+    } else {
+      const buttons = headerRow.querySelectorAll("button");
+      const lastBtn = buttons.length > 0 ? buttons[buttons.length - 1] : null;
+      if (lastBtn && lastBtn !== headerRow) {
+        lastBtn.insertAdjacentElement("beforebegin", btn);
+      } else {
+        headerRow.appendChild(btn);
+      }
+    }
+  }
+
+  // ===== MAIN SCANNER =====
+
+  function scanForFiles() {
+    const repoInfo = getRepoInfo();
+    if (!repoInfo) return;
+
+    scanNewUI(repoInfo);
+    scanOldUI(repoInfo);
+  }
+
   let scanTimeout = null;
   function debouncedScan() {
     if (scanTimeout) clearTimeout(scanTimeout);
     scanTimeout = setTimeout(() => scanForFiles(), 200);
   }
 
-  // Run initial scan
   scanForFiles();
 
-  // Observe DOM changes (GitHub SPA navigation)
   const observer = new MutationObserver(debouncedScan);
-  observer.observe(document.body, {
-    childList: true,
-    subtree: true,
-  });
+  observer.observe(document.body, { childList: true, subtree: true });
 
-  // Re-scan on turbo/pjax navigation
   document.addEventListener("turbo:load", () => scanForFiles());
   document.addEventListener("pjax:end", () => scanForFiles());
 
-  // Re-scan after delays to catch late-rendered React content
   setTimeout(() => scanForFiles(), 2000);
   setTimeout(() => scanForFiles(), 5000);
 
-  console.log("[GitHub PR File Preview] Extension loaded v1.3.0");
+  console.log("[GitHub PR File Preview] Extension loaded v1.4.0");
 })();
