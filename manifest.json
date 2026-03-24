@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "GitHub PR File Preview",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "description": "Preview PDF, XLSX, and DOCX files directly in GitHub Pull Request pages",
   "permissions": ["activeTab", "storage"],
   "host_permissions": [

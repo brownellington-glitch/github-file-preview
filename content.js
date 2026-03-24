@@ -43,21 +43,104 @@
     });
   }
 
-  async function fetchFileContent(filePath, repoInfo) {
-    if (!prInfoCache) {
-      const token = await getGitHubToken();
-      const headers = { Accept: "application/vnd.github.v3+json" };
-      if (token) headers["Authorization"] = `token ${token}`;
-
-      const prApiUrl = `https://api.github.com/repos/${repoInfo.owner}/${repoInfo.repo}/pulls/${repoInfo.pr}`;
-      const prResp = await fetch(prApiUrl, { headers });
-      if (!prResp.ok) throw new Error(`Failed to fetch PR info: ${prResp.status}`);
-      prInfoCache = await prResp.json();
+  // Extract PR head info from the page DOM (no cross-origin API call needed)
+  function extractPRInfoFromPage() {
+    // Strategy 1: New React UI embedded JSON
+    const embeddedScript = document.querySelector('script[data-target="react-app.embeddedData"]');
+    if (embeddedScript) {
+      try {
+        const data = JSON.parse(embeddedScript.textContent);
+        const pr = data?.payload?.pullRequestsChangesRoute?.pullRequest
+          || data?.payload?.pullRequestsLayoutRoute?.pullRequest;
+        const comparison = data?.payload?.pullRequestsChangesRoute?.comparison?.fullDiff
+          || data?.payload?.pullRequestsChangesRoute?.comparison;
+        const headSha = data?.payload?.pullRequestsLayoutRoute?.mergeStatusButtonData?.headSha
+          || comparison?.headOid;
+        if (pr && pr.headRepositoryOwnerLogin && pr.headRepositoryName && pr.headBranch) {
+          return {
+            headRef: pr.headBranch,
+            headRepo: `${pr.headRepositoryOwnerLogin}/${pr.headRepositoryName}`,
+            headSha: headSha || null,
+          };
+        }
+      } catch (e) { /* continue */ }
     }
 
-    const headRef = prInfoCache.head.ref;
-    const headRepo = prInfoCache.head.repo.full_name;
-    const headSha = prInfoCache.head.sha;
+    // Strategy 2: Old UI - react-partial embedded data
+    for (const script of document.querySelectorAll('script[data-target="react-partial.embeddedData"]')) {
+      try {
+        const data = JSON.parse(script.textContent);
+        const pr = data?.props?.pullRequest || data?.pullRequest;
+        if (pr?.headRefName && pr?.headRepository?.nameWithOwner) {
+          return {
+            headRef: pr.headRefName,
+            headRepo: pr.headRepository.nameWithOwner,
+            headSha: pr.headRefOid || null,
+          };
+        }
+      } catch (e) { /* continue */ }
+    }
+
+    return null;
+  }
+
+  async function fetchFileContent(filePath, repoInfo) {
+    if (!prInfoCache) {
+      // Try extracting from page DOM first (works for both public and private repos)
+      prInfoCache = extractPRInfoFromPage();
+
+      // Fallback: same-origin fetch of PR page to parse info
+      if (!prInfoCache) {
+        try {
+          const prPageUrl = `https://github.com/${repoInfo.owner}/${repoInfo.repo}/pull/${repoInfo.pr}`;
+          const resp = await fetch(prPageUrl, {
+            credentials: "same-origin",
+            headers: { Accept: "text/html" },
+          });
+          if (resp.ok) {
+            const html = await resp.text();
+            const parser = new DOMParser();
+            const doc = parser.parseFromString(html, "text/html");
+            for (const script of doc.querySelectorAll('script[data-target*="embeddedData"]')) {
+              try {
+                const data = JSON.parse(script.textContent);
+                const pr = data?.payload?.pullRequestsLayoutRoute?.pullRequest
+                  || data?.payload?.pullRequest;
+                if (pr?.headBranch && pr?.headRepositoryOwnerLogin && pr?.headRepositoryName) {
+                  prInfoCache = {
+                    headRef: pr.headBranch,
+                    headRepo: `${pr.headRepositoryOwnerLogin}/${pr.headRepositoryName}`,
+                    headSha: data?.payload?.pullRequestsLayoutRoute?.mergeStatusButtonData?.headSha || null,
+                  };
+                  break;
+                }
+              } catch (e) { /* continue */ }
+            }
+          }
+        } catch (e) { /* continue */ }
+      }
+
+      // Last resort: GitHub API (needs PAT for private repos)
+      if (!prInfoCache) {
+        const token = await getGitHubToken();
+        const headers = { Accept: "application/vnd.github.v3+json" };
+        if (token) headers["Authorization"] = `token ${token}`;
+
+        const prApiUrl = `https://api.github.com/repos/${repoInfo.owner}/${repoInfo.repo}/pulls/${repoInfo.pr}`;
+        const prResp = await fetch(prApiUrl, { headers });
+        if (!prResp.ok) throw new Error(`Failed to fetch PR info: ${prResp.status}`);
+        const prData = await prResp.json();
+        prInfoCache = {
+          headRef: prData.head.ref,
+          headRepo: prData.head.repo.full_name,
+          headSha: prData.head.sha,
+        };
+      }
+    }
+
+    const headRef = prInfoCache.headRef;
+    const headRepo = prInfoCache.headRepo;
+    const headSha = prInfoCache.headSha;
 
     // Strategy 1: Same-origin fetch (includes session cookies - works for private repos)
     try {
@@ -441,5 +524,5 @@
   setTimeout(() => scanForFiles(), 2000);
   setTimeout(() => scanForFiles(), 5000);
 
-  console.log("[GitHub PR File Preview] Extension loaded v1.4.0");
+  console.log("[GitHub PR File Preview] Extension loaded v1.5.0");
 })();
