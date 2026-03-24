@@ -524,5 +524,5 @@
   setTimeout(() => scanForFiles(), 2000);
   setTimeout(() => scanForFiles(), 5000);
 
-  console.log("[GitHub PR File Preview] Extension loaded v1.5.0");
+  console.log("[GitHub PR File Preview] Extension loaded v1.5.1");
 })();
